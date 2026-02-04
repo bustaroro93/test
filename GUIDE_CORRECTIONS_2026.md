@@ -6,13 +6,13 @@ Le fichier 2026 a des conflits de fusion (merge conflicts) en co-edition (ShareP
 
 ## Cause racine
 
-Le refactoring 2026 a introduit un pattern **Unprotect → Action → Protect** dans chaque fonction utilitaire (`modUI`, `modData`, `modSecurity`). En co-edition, 2 utilisateurs actifs simultanement declenchent ces cycles en parallele, ce qui cree des conflits de fusion.
+Le refactoring 2026 a introduit un pattern **Unprotect -> Action -> Protect** dans chaque fonction utilitaire (`modUI`, `modData`, `modSecurity`). En co-edition, 2 utilisateurs actifs simultanement declenchent ces cycles en parallele, ce qui cree des conflits de fusion.
 
 Les 3 mecanismes responsables :
 
-1. **modUI.bas** (`CreateValidatedDropdown`) : chaque liste deroulante fait Unprotect WB → Unprotect Sheet → Ecrit TempLists → Cree Named Range → Protect
-2. **modSecurity.bas** (`g_SecurityDone` + filter enforcement) : applique filtres par colonne avec flag global
-3. **Feuil1.cls** : appelle modUI/modData/modFilters avec cycles Protect/Unprotect constants
+1. **modUI.bas** (`CreateValidatedDropdown`) : chaque liste deroulante fait Unprotect WB -> Unprotect Sheet -> Ecrit TempLists -> Cree Named Range -> Protect
+2. **modSecurity.bas** (`g_SecurityDone` + `modFilters.EnforceAllowedFilterDropdowns`) : applique filtres par colonne avec flag global et cycles Unprotect/Protect supplementaires
+3. **Feuil1.cls** (`g_ActivateDone` + header shields) : setup complexe a chaque activation avec cycles Protect/Unprotect
 
 En 2025, les listes etaient creees avec `Formula1:="Oui,Non"` ou `CreateDropdown` inline, sans toucher a la protection.
 
@@ -20,124 +20,64 @@ En 2025, les listes etaient creees avec `Formula1:="Oui,Non"` ou `CreateDropdown
 
 ## Objectif
 
-Revenir au fonctionnement 2025 dans le fichier 2026, en gardant :
-- Le **bouton Reset Filtre** (`modFilters.bas`)
-- Le **mode Consultation** (`modConsultation.bas`)
+Garder l'architecture modulaire 2026, en corrigeant seulement les 4 modules qui causent les conflits. Les 2 fonctionnalites 2026 (Reset Filtre + Mode Consultation) restent intactes.
 
 ---
 
-## Plan d'action detaille
+## APPROCHE RECOMMANDEE : Correction chirurgicale (4 modules)
 
-### A. MODULES A SUPPRIMER (8 modules)
+Au lieu de tout supprimer et reimporter du 2025, on corrige **uniquement les 4 fichiers responsables**. Tous les autres modules (modData, modDocument, modEmail, modConsultation, modFilters, etc.) restent INCHANGES.
 
-| Module | Raison |
-|---|---|
-| `modUI.bas` | Moteur centralise de validation/TempLists - COUPABLE PRINCIPAL |
-| `modData.bas` | Remplace par Module1 de 2025 |
-| `modDocument.bas` | Remplace par Module17 de 2025 |
-| `modEmail.bas` | Remplace par Module9 de 2025 |
-| `modResetAnnuel.bas` | N'existait pas en 2025 |
-| `modReparation.bas` | N'existait pas en 2025 |
-| `modDashboard.bas` | N'existait pas en 2025 |
-| `modDateNotif.bas` | N'existait pas en 2025 |
+### Principe de la correction
 
-### B. MODULES A CONSERVER
+**Pourquoi ca marchait en 2025 ?** Parce que les feuilles etaient protegees avec `UserInterfaceOnly:=True`. Ce parametre permet au VBA de modifier les cellules, validations et filtres SANS avoir besoin de deproteger/reproteger. Le code 2026 fait ces cycles Unprotect/Protect inutilement.
 
-| Module | Action |
-|---|---|
-| `modConsultation.bas` | GARDER TEL QUEL |
-| `modFilters.bas` | GARDER mais remplacer `modSecurity.CanUseAnyFilters()` et `modSecurity.CanSort()` par `True` |
+### Les 4 fichiers a remplacer
 
-### C. MODULES A REMPLACER (3 fichiers)
+Les fichiers corriges sont fournis dans le depot :
 
-#### 1. ThisWorkbook.cls
+| Fichier | Ce qui change | Fichier corrige |
+|---|---|---|
+| `modUI.bas` | Suppression de TOUS les Unprotect/Protect dans CreateValidatedDropdown + utilisation de Formula1 directe quand la liste < 255 chars | `FIX_modUI.bas` |
+| `modSecurity.bas` | Suppression de g_SecurityDone + suppression de l'appel a EnforceAllowedFilterDropdowns + simplification de EnforceSecurity | `FIX_modSecurity.bas` |
+| `Feuil1.cls` | Suppression de g_ActivateDone + header shields + Worksheet_Activate simplifie (Formula1:="Oui,Non" direct) | `FIX_Feuil1.cls` |
+| `ThisWorkbook.cls` | Suppression du scroll auto dans Workbook_Open + suppression du Me.Save auto dans BeforeClose | `FIX_ThisWorkbook.cls` |
 
-Remplacer par la version 2025 + ajout nettoyage consultation :
+### Modules qui NE CHANGENT PAS
 
-```vb
-Option Explicit
-
-Private Sub Workbook_Open()
-    On Error Resume Next
-    modSecurity.EnforceSecurity
-End Sub
-
-Private Sub Workbook_SheetActivate(ByVal Sh As Object)
-    On Error Resume Next
-    modSecurity.RehideIfUnauthorized Sh
-End Sub
-
-Private Sub Workbook_NewSheet(ByVal Sh As Object)
-    On Error Resume Next
-    modSecurity.HandleNewSheet Sh
-End Sub
-
-Private Sub Workbook_BeforeClose(Cancel As Boolean)
-    On Error Resume Next
-    modConsultation.SupprimerVuesTemporaires
-    modSecurity.CancelAutoRehide
-End Sub
-```
-
-#### 2. Feuil1.cls
-
-Remplacer par la version 2025 complete. Seule adaptation :
-- Chemin dossier dans `Worksheet_BeforeRightClick` : `...\2026\020 Suivi plan de travaux 2026`
-- Appel `ProcessusCompletPourLigne` reste sur Module17
-
-#### 3. modSecurity.bas
-
-Revenir a la version 2025 avec 2 ajouts :
-- `AllowedVisibleNames` : ajouter `"Tableau de Bord"` si necessaire
-- `IsAllowed` : ajouter detection `FILTRE_PERSO` pour le mode consultation :
-  ```vb
-  If Left$(sheetName, 12) = "FILTRE_PERSO" Then
-      IsAllowed = True
-      Exit Function
-  End If
-  ```
-
-### D. MODULES 2025 A REIMPORTER
-
-| Module | Contenu |
-|---|---|
-| Module1 | GetComptesMatches, GetImputationMatches, GetCategorieMatches, GetUFSMatches, etc. |
-| Module2 | TestCorrespondance |
-| Module3 | ClearAllValidations |
-| Module4 | ApplyAllDropdownsFixed |
-| Module5 | ClearCompteValidation + ClearCompteIPCat |
-| Module6 | CreateDropdownFromRange |
-| Module7 | CreateDropdownRange |
-| Module8 | ApplyDropdownToColumns + ApplyDropdownSorted |
-| Module9 | PrepareEmail (version sans ConfigEmails) |
-| Module10 | FormatLignesProfessionnel |
-| Module11 | FormatTablePersonnalise |
-| Module12 | BtnAjoutEntreprise_Click + BtnAjoutCategorie_Click |
-| Module13 | RemplirEtFormaterDossiers |
-| Module14 | ActualiserReferents |
-| Module15 | ApplyCodeProjetDropdown |
-| Module16 | UpdateValidationColumnW |
-| Module17 | ProcessusCompletPourLigne |
-
-### E. FEUILLES CACHEES
-
-- `TempLists` : SUPPRIMER
-- `ConfigEmails` : SUPPRIMER (emails hardcodes dans Module9)
-- `ErrorLog` / `Sys` : Peuvent rester
-
-### F. MODULES 2026 A SUPPRIMER
-
-Les Module1 a Module4 actuels du 2026 (NettoyerLeVide, NettoyerNomsValidList, PACK_CLEAN, Refresh_CodesProjets) sont des utilitaires specifiques au refactoring 2026. Ils peuvent etre supprimes car ils dependent de modUI/modData.
+- `modData.bas` - inchange
+- `modDocument.bas` - inchange
+- `modEmail.bas` - inchange
+- `modConsultation.bas` - inchange
+- `modFilters.bas` - inchange (les fonctions CanUseAnyFilters/CanSort qu'il appelle sont gardees dans modSecurity)
+- `modReparation.bas` - inchange
+- `modDashboard.bas` - inchange
+- `modDateNotif.bas` - inchange
+- `modResetAnnuel.bas` - inchange
+- `Module1.bas` a `Module4.bas` (2026) - inchanges
 
 ---
 
 ## Procedure dans l'editeur VBA
 
-1. Ouvrir le fichier 2026 → Alt+F11
-2. Supprimer les 8 modules listes en A
-3. Supprimer les 4 Module1-4 du 2026
-4. Importer les 17 modules du 2025
-5. Remplacer le code de ThisWorkbook, Feuil1, modSecurity
-6. Adapter modFilters (remplacer CanUseAnyFilters/CanSort par True)
-7. Supprimer les feuilles TempLists et ConfigEmails
-8. Sauvegarder et tester en co-edition
+1. Ouvrir le fichier 2026 -> **Alt+F11**
+2. Double-clic sur **ThisWorkbook** -> Remplacer TOUT le code par le contenu de `FIX_ThisWorkbook.cls`
+3. Double-clic sur **Feuil1** (Demande OS) -> Remplacer TOUT le code par le contenu de `FIX_Feuil1.cls`
+4. Double-clic sur **modSecurity** -> Remplacer TOUT le code par le contenu de `FIX_modSecurity.bas`
+5. Double-clic sur **modUI** -> Remplacer TOUT le code par le contenu de `FIX_modUI.bas`
+6. **Ctrl+S** pour sauvegarder
+7. Fermer et rouvrir le fichier pour tester
+
+---
+
+## Resume des corrections
+
+| Correction | Pourquoi |
+|---|---|
+| Suppression Unprotect/Protect dans modUI | `UserInterfaceOnly:=True` rend ces cycles inutiles. 2 users faisant Unprotect/Protect en meme temps = conflit |
+| Suppression g_SecurityDone | Flag qui empechait la re-initialisation et desynchronisait les sessions |
+| Suppression g_ActivateDone | Meme probleme que g_SecurityDone |
+| Suppression header shields (Shapes) | Manipulation de Shapes sur l'en-tete qui entrait en conflit entre sessions |
+| Suppression EnforceAllowedFilterDropdowns au demarrage | Cette fonction faisait un cycle Unprotect/Protect par colonne (31 colonnes = 31 cycles) |
+| Suppression scroll auto + Me.Save | En co-edition, le scroll et la sauvegarde sont geres par SharePoint/OneDrive |
+| Formula1:="Oui,Non" direct | Au lieu de passer par un Named Range VL_OuiNon qui necessite TempLists |
